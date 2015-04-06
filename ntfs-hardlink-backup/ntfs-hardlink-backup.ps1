@@ -63,6 +63,9 @@
 	Or specify a CIDR prefix size (0 to 32)
 	Use this in an office with multiple subnets that can all be covered (summarised) by a single netmask.
 	Without this parameter the default is to use the subnet mask of the local machine interface(s), if localSubnetOnly is on.
+.PARAMETER SkipIfNoChanges
+	Check log file for changes on source and delete backup folder if not changes.
+	Thus, we get less backup folders and therefore less hard links. Delaying the possibility of reaching the NTFS link limit of 1023.
 .PARAMETER emailTo
 	Address to be notified about success and problems. If not given no Emails will be sent.
 .PARAMETER emailFrom
@@ -166,6 +169,8 @@ Param(
 	[switch]$localSubnetOnly,
 	[Parameter(Mandatory=$False)]
 	[string]$localSubnetMask,
+	[Parameter(Mandatory=$False)]
+	[switch]$SkipIfNoChanges,
 	[Parameter(Mandatory=$False)]
 	[string]$emailSubject="",
 	[Parameter(Mandatory=$False)]
@@ -461,8 +466,6 @@ Function Get-Version
 	}
 }
 
-
-
 $emailBody = ""
 $error_during_backup = $false
 $doBackup = $true
@@ -643,6 +646,11 @@ if (-not $localSubnetOnly.IsPresent) {
 
 if ([string]::IsNullOrEmpty($localSubnetMask)) {
 	$localSubnetMask = Get-IniParameter "localSubnetMask" "${FQDN}"
+}
+
+if (-not $SkipIfNoChanges.IsPresent) {
+	$IniFileString = Get-IniParameter "SkipIfNoChanges" "${FQDN}"
+	$SkipIfNoChanges = Is-TrueString "${IniFileString}"
 }
 
 if (![string]::IsNullOrEmpty($localSubnetMask)) {
@@ -1394,6 +1402,46 @@ if (($parameters_ok -eq $True) -and ($doBackup -eq $True) -and (test-path $backu
 				}
 			}
 
+			#.PARAMETER SkipIfNoChanges
+			#Check log file for changes on source and delete backup folder if not changes.
+			#Thus, we get less backup folders and therefore less hard links. Delaying the possibility of reaching the NTFS link limit of 1023.		
+			$backup_deleted=$false
+			if (($LogFile) -and ($SkipIfNoChanges -eq $True)) {
+
+				if ($StepTiming -eq $True) {
+					$stepTime = get-date -f "yyyy-MM-dd HH-mm-ss"
+				}
+
+				echo  "$stepCounter $stepTime Checking for changes"
+				$stepCounter++
+
+				$have_changes=$false
+				foreach ( $line in 1..$backup_response.length ) {	
+					if ($backup_response[$line] -match '^(\+|-|\*)(f|h|s|j|m|d|t|e|p)\s[a-z]:\\') {
+						$have_changes=$true
+						break
+					}
+				}
+				
+				if($have_changes -eq $False)
+				{
+					echo "ATTENTION: Delete the backup $actualBackupDestination$backupMappedString because no changes"
+					if ($LogFile) {
+						"`r`nATTENTION: Delete the backup $actualBackupDestination$backupMappedString because no changes" | Out-File "$LogFile"  -encoding ASCII -append
+					}
+
+					`cmd /c  "`"`"$lnPath`"  --deeppathdelete `"$actualBackupDestination$backupMappedString`" $logFileCommandAppend`""`					
+					
+					#Flag because later we add 1 and we deleted the folder
+					$backup_deleted=$true
+				} else {
+					echo "Changes found. We keep the backup $actualBackupDestination$backupMappedString"
+				}
+				
+				echo "`n"
+
+			}
+			
 			if ($StepTiming -eq $True) {
 				$stepTime = get-date -f "yyyy-MM-dd HH-mm-ss"
 			}
@@ -1403,7 +1451,13 @@ if (($parameters_ok -eq $True) -and ($doBackup -eq $True) -and (test-path $backu
 
 			#plus 1 because we just created a new backup but we have checked for old backups before we have
 			#created the new one
-			$backupsInDestination = $lastBackupFolders.length + 1
+			#Only if we have not deleted folder because SkipIfNoChanges Parameter
+			if ($backup_deleted -eq $False) {
+				$backupsInDestination = $lastBackupFolders.length + 1
+			} else {
+				$backupsInDestination = $lastBackupFolders.length
+			}
+
 			$summary = $yearBackupsKeptText + "Found $backupsInDestination regular backup(s), keeping a maximum of $backupsToKeep regular backup(s)`n"
 			echo $summary
 
